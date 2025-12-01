@@ -101,7 +101,7 @@ class Agent:
     #########################################################################
     # TODO: store and tune hyperparameters here
 
-    batch_size: int = 256
+    batch_size: int = 512 #default 256
     gamma: float = 0.99  # MDP discount factor
 
     tau: float = 0.005  # Polyak averaging coefficient
@@ -109,8 +109,12 @@ class Agent:
     learning_rate_pi: float = 1e-4  # Learning rate for actor
     learning_rate_eta: float = 1e-3 # Learning rate for temperature eta
     target_kl: float = 0.01  # Target KL divergence for the M-step
-    num_samples_q: int = 20  # Number of samples for E-step (critic update)
-    num_samples_pi: int = 20 # Number of samples for M-step (actor update)
+    num_samples_q: int = 50  # Number of samples for E-step (critic update) #default 20
+    num_samples_pi: int = 50 # Number of samples for M-step (actor update) #default 20
+    num_layers_actor: int = 2
+    num_units_actor: int = 512
+    num_layers_critic: int = 2
+    num_units_critic: int = 512
     
     #########################################################################
 
@@ -129,14 +133,14 @@ class Agent:
         # DONE: initialize actor, critic and attributes
         # 1. Initialize Actor (pi) and Target Actor (pi_target)
         # (Use the Actor class)
-        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers, self.num_units)
-        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor)
+        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor)
         # 2. Initialize TWO Critics (q1, q2) and their Targets (q1_target, q2_target)
         # (This is the "twin critics" trick from TD3, which MPO also uses)
-        self.q1 = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
-        self.q2 = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
-        self.q1_target = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
-        self.q2_target = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.q1 = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
+        self.q2 = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
+        self.q1_target = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
+        self.q2_target = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
         # 3. Initialize the optimizers for q1, q2, and pi
         self.q1_optimizer = optim.Adam(self.q1.parameters(), lr=self.learning_rate_q)
         self.q2_optimizer = optim.Adam(self.q2.parameters(), lr=self.learning_rate_q)
@@ -155,6 +159,10 @@ class Agent:
         Updates actor and critic with one batch from the replay buffer.
         '''
         obs, action, next_obs, done, reward = self.buffer.sample(self.batch_size)
+
+        # Ensure reward and done are [batch_size, 1]
+        reward = reward.view(self.batch_size, 1)
+        done = done.view(self.batch_size, 1)
 
         #####################################################################
         # DONE: code MPO training logic (E-Step and M-Step)
@@ -237,7 +245,11 @@ class Agent:
 
         # 20. Get the new online distribution (post-update)
         dist_online_new = self.pi(obs)
-        kl = torch.distributions.kl_divergence(dist_online, dist_online_new.detach()).mean()
+        dist_online_new_detached = torch.distributions.Normal(
+            dist_online_new.loc.detach(), 
+            dist_online_new.scale.detach()
+        )
+        kl = torch.distributions.kl_divergence(dist_online, dist_online_new_detached).mean()
         
         # 21. Compute the temperature loss
         # (Hint: eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach())
@@ -259,7 +271,6 @@ class Agent:
         soft_update(self.q1_target, self.q1, self.tau)
         soft_update(self.q2_target, self.q2, self.tau)
         soft_update(self.pi_target, self.pi, self.tau)
-
         #####################################################################
 
     def get_action(self, obs, train):
@@ -291,7 +302,7 @@ class Agent:
             # (Use self.action_scale and self.action_bias)
             action_scaled = action_tanh * self.action_scale + self.action_bias
             # 6. Convert to numpy array and return
-            action = action_scaled.squeeze(0).cpu().numpy()
+            action = action_scaled.cpu().numpy().astype(np.float64)
         return action
 
 
@@ -328,6 +339,7 @@ if __name__ == '__main__':
 
         env = get_env()
         env.action_space.seed(seed)
+
         env.np_random, _ = seeding.np_random(seed)
 
         agent = Agent(env)

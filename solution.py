@@ -38,14 +38,11 @@ class Critic(nn.Module):
 
     def forward(self, x, a):
         #####################################################################
-        # TODO: code the forward pass
+        # DONE: code the forward pass
         # the critic receives a batch of observations and a batch of actions
         # of shape (batch_size x obs_size) and batch_size x action_size) respectively
         # and output a batch of values of shape (batch_size x 1)
-        
-        value = torch.zeros(x.shape[0], 1, device=x.device)
-
-        #####################################################################
+        value = self.net(torch.cat([x, a], dim=-1))
         return value
 
 LOG_STD_MAX = 2
@@ -59,10 +56,12 @@ class Actor(nn.Module):
     def __init__(self, action_low, action_high,  obs_size, action_size, num_layers, num_units):
         super().__init__()
         #####################################################################
-        # TODO: define the network layers
+        # DONE: define the network layers
         # The network should output TWO values for each action dimension:
         # The mean (mu) and the log standard deviation (log_std)
         # So, the final layer should have 2 * action_size outputs
+
+        self.net = MLP([obs_size] + ([num_units] * num_layers) + [2 * action_size])
 
         # store action scale and bias: the actor's output can be squashed to [-1, 1]
         self.action_scale = (action_high - action_low) / 2
@@ -70,23 +69,33 @@ class Actor(nn.Module):
 
     def forward(self, x):
         #####################################################################
-        # TODO: code the forward pass
+        # DONE: code the forward pass
         # 1. Pass the observation x through the network
         # 2. Split the output into mean (mu) and log_std
+        mu, log_std = torch.chunk(self.net(x), 2, dim=-1)
         #    (Hint: use torch.chunk(..., 2, dim=-1))
         # 3. Constrain log_std to be within [LOG_STD_MIN, LOG_STD_MAX]
+        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
         #    (Hint: use torch.clamp)
         # 4. Calculate std = exp(log_std)
+        std = torch.exp(log_std)
         # 5. Return a Normal distribution: torch.distributions.Normal(mu, std)
-        
-        # Return a distribution
         return torch.distributions.Normal(mu, std)
 
 
 class Agent:
 
     # automatically select compute device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = 'cpu'
+        print("Using CPU")
+    # set device to default for torch if not otherwise specified for all torch objects
+    torch.set_default_device(device)
+    torch.set_default_dtype(torch.float32)
+
     buffer_size: int = 50_000  # no need to change
 
     #########################################################################
@@ -117,15 +126,21 @@ class Agent:
         self.action_bias = (self.action_high + self.action_low) / 2
 
         #####################################################################
-        # TODO: initialize actor, critic and attributes
+        # DONE: initialize actor, critic and attributes
         # 1. Initialize Actor (pi) and Target Actor (pi_target)
         # (Use the Actor class)
-        
+        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers, self.num_units)
         # 2. Initialize TWO Critics (q1, q2) and their Targets (q1_target, q2_target)
         # (This is the "twin critics" trick from TD3, which MPO also uses)
-
+        self.q1 = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.q2 = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.q1_target = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
+        self.q2_target = Critic(self.obs_size, self.action_size, self.num_layers, self.num_units)
         # 3. Initialize the optimizers for q1, q2, and pi
-
+        self.q1_optimizer = optim.Adam(self.q1.parameters(), lr=self.learning_rate_q)
+        self.q2_optimizer = optim.Adam(self.q2.parameters(), lr=self.learning_rate_q)
+        self.pi_optimizer = optim.Adam(self.pi.parameters(), lr=self.learning_rate_pi)
         # 4. Initialize the learnable temperature 'eta' for the KL constraint
         self.log_eta = torch.tensor(1.0, device=self.device, requires_grad=True)
         self.eta_optimizer = optim.Adam([self.log_eta], lr=self.learning_rate_eta)
@@ -142,72 +157,77 @@ class Agent:
         obs, action, next_obs, done, reward = self.buffer.sample(self.batch_size)
 
         #####################################################################
-        # TODO: code MPO training logic (E-Step and M-Step)
+        # DONE: code MPO training logic (E-Step and M-Step)
 
         with torch.no_grad():
             # 1. Get target policy distribution at next_obs
-            # dist_target = self.pi_target(next_obs)
-            dist_target = None  # Placeholder
-
+            dist_target = self.pi_target(next_obs)
             # 2. Sample K actions from the target policy distribution
             # (Hint: use .sample((self.num_samples_q,))
-            
+            next_actions_samples = dist_target.sample((self.num_samples_q,))
             # 3. Squash and rescale the K sampled actions
-            
+            next_actions_samples = torch.tanh(next_actions_samples) * self.action_scale + self.action_bias
             # 4. Expand next_obs to match the K samples
-            
+            next_obs_expanded = next_obs.unsqueeze(0).repeat(self.num_samples_q, 1, 1)
             # 5. Get target Q-values for all (next_obs_expanded, next_actions_samples) pairs
             # (Use the twin target critics and take the minimum q_target_all = torch.min(self.q1_target(...), self.q2_target(...))
-
+            q_target_all = torch.min(self.q1_target(next_obs_expanded, next_actions_samples), self.q2_target(next_obs_expanded, next_actions_samples))
             # 6. Average the K target Q-values to get the expected Q-value (q_next)
             # (Hint: reshape q_target_all to [num_samples, batch_size, 1] and take mean(dim=0))
-            
+            q_target_all = q_target_all.reshape(self.num_samples_q, self.batch_size, 1)
+            q_next = q_target_all.mean(dim=0)
             # 7. Compute the final Bellman target (y)
             y = reward + (1 - done) * self.gamma * q_next
 
         # 8. Compute the critic loss (MSE loss) for BOTH critics
-        q1_values = None
-        q2_values = None
-        q1_loss = None
-        q2_loss = None
+        q1_values = self.q1(obs, action)
+        q2_values = self.q2(obs, action)
+        q1_loss = nn.MSELoss()(q1_values, y)
+        q2_loss = nn.MSELoss()(q2_values, y)
         q_loss = q1_loss + q2_loss
         
         # 9. Optimize the critic(s)
-        self.q_optimizer.zero_grad()
-        q_loss.backward()
-        self.q_optimizer.step()
+        self.q1_optimizer.zero_grad()
+        q1_loss.backward()
+        self.q1_optimizer.step()
+        self.q2_optimizer.zero_grad()
+        q2_loss.backward()
+        self.q2_optimizer.step()
 
         # --- Policy Improvement (M-Step): Update Actor & Eta ---
         # Goal: Find a new policy that maximizes Q-values,
         #       subject to a KL constraint.
         
         # 10. Get online policy distribution at obs
-        dist_online = None
+        dist_online = self.pi(obs)
 
         # 11. Sample K actions from the online policy distribution
         # (Use .rsample() for reparameterization)
-
+        actions_samples = dist_online.rsample((self.num_samples_pi,))
         # 12. Squash and rescale the K sampled actions
-
+        actions_samples = torch.tanh(actions_samples) * self.action_scale + self.action_bias
         # 13. Expand obs to match the K samples
-        
+        obs_expanded = obs.unsqueeze(0).repeat(self.num_samples_pi, 1, 1)
         # 14. Get Q-values for the (obs_expanded, actions_samples) pairs
         # (Use one of the online critics, e.g., q1. Detach from critic graph)
-        
+        q1_values_samples = self.q1(obs_expanded, actions_samples).detach()
+        q2_values_samples = self.q2(obs_expanded, actions_samples).detach()
+        q_values_samples = torch.min(q1_values_samples, q2_values_samples)
         # 15. Get the temperature eta
         eta = torch.exp(self.log_eta).detach()
 
         # 16. Compute the importance weights (w)
         # (Hint: w = softmax(q_values_samples / eta, dim=0))
-        
+        w = torch.softmax(q_values_samples / eta, dim=0)
         # 17. Compute the log-probability of the sampled actions
         #     under the online policy
         # (This requires care with the Tanh squashing)
         # log_prob_samples = ...
+        log_prob_samples = dist_online.log_prob(actions_samples)
         
         # 18. Compute the policy loss (weighted log-likelihood)
         # (Hint: pi_loss = - (w * log_prob_samples).mean())
-        
+        pi_loss = - (w * log_prob_samples).mean()
         # 19. Optimize the actor
         self.pi_optimizer.zero_grad()
         pi_loss.backward()
@@ -221,7 +241,7 @@ class Agent:
         
         # 21. Compute the temperature loss
         # (Hint: eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach())
-        
+        eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach()
         # 22. Optimize eta
         self.eta_optimizer.zero_grad()
         eta_loss.backward()
@@ -231,7 +251,15 @@ class Agent:
 
         # 23. Softly update all target networks (q1_target, q2_target, pi_target)
         # (Use Polyak averaging with self.tau)
-        
+        def soft_update(target, source, tau):
+            for target_param, param in zip(target.parameters(), source.parameters()):
+                target_param.data.copy_(
+                    tau * param.data + (1.0 - tau) * target_param.data
+                )
+        soft_update(self.q1_target, self.q1, self.tau)
+        soft_update(self.q2_target, self.q2, self.tau)
+        soft_update(self.pi_target, self.pi, self.tau)
+
         #####################################################################
 
     def get_action(self, obs, train):
@@ -240,34 +268,32 @@ class Agent:
         The train parameter can be used to control stochastic behavior.
         '''
         #####################################################################
-        # TODO: return the agent's action
+        # DONE: return the agent's action
         
         # 1. Convert obs to a tensor and send to device
-
+        obs = torch.tensor(obs, device=self.device).float()
         # 2. Get the action distribution from the actor (self.pi)
-
+        dist = self.pi(obs)
         with torch.no_grad():
             # 3. Get action
             if train:
                 # During training: sample from the distribution
                 # (Hint: use dist.rsample() for reparameterization trick)
-                action_gaussian = torch.zeros(1, self.action_size, device=self.device) # Placeholder
+                action_gaussian = dist.rsample()
             else:
                 # During testing: use the deterministic mean
-                action_gaussian = torch.zeros(1, self.action_size, device=self.device) # Placeholder (use dist.mean)
+                action_gaussian = dist.mean
             
             # 4. Squash the action through a Tanh function
-            action_tanh = torch.zeros_like(action_gaussian) # Placeholder
+            action_tanh = torch.tanh(action_gaussian)
             
             # 5. Rescale and shift the action to the environment's bounds
             # (Use self.action_scale and self.action_bias)
-            action_scaled = torch.zeros_like(action_tanh) # Placeholder
-            
+            action_scaled = action_tanh * self.action_scale + self.action_bias
             # 6. Convert to numpy array and return
             action = action_scaled.squeeze(0).cpu().numpy()
-        
-        #####################################################################
         return action
+
 
     def store(self, transition):
         '''

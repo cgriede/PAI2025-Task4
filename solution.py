@@ -208,7 +208,8 @@ class Agent:
         obs, action, next_obs, done, reward = self.buffer.sample(self.batch_size)
 
         # REWARD-DEPENDENT LR SCHEDULING — THIS IS THE HOLY GRAIL
-        if not self.lr_reduced and self.episode_returns[-1] >= -30:
+        
+        if not self.lr_reduced and (self.episode_returns[-1] if self.episode_returns else -200) >= -30:
             print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.safe_lr_pi:.1e}")
             for g in self.pi_optimizer.param_groups:
                 g['lr'] = self.safe_lr_pi

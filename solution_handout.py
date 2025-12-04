@@ -104,8 +104,7 @@ class Agent:
     num_samples_pi: int = 20 # Number of samples for M-step (actor update)
     
     #########################################################################
-    learning_rate_q: float = 0.0005
-    learning_rate_pi: float = 0.0005
+
 
     def __init__(self, env):
 

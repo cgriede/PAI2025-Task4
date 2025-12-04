@@ -174,6 +174,9 @@ def run_episode(env, agent, mode, verbose=False, rec=False):
         print(f"{mode.capitalize()} return: {episode_return}")
 
     if rec:
-        env.stop_recording()
-
+        try:
+            env.close()
+        except:
+            print("Error stopping recording")
+            pass
     return episode_return

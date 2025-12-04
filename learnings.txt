@@ -1,0 +1,8 @@
+initialization of the actor weights is extremely important since
+using wrong initialization or wrong seed in initialization gives bad results for training
+performance
+
+performance of the algorithm is highly dependant on the learning rates chosen. If we take slightly too high learning rates then the algorithm will collapse
+to some nonsensical solution for certain seeds.
+
+model complexity is also really important since choosing a too large network for the actor for example produces unstable results (stable shitty results)

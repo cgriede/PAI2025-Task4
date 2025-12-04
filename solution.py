@@ -132,32 +132,21 @@ class Agent:
     buffer_size: int = 50_000  # no need to change
 
     #########################################################################
-    # TODO: store and tune hyperparameters here
-    tau: float = 0.005  # Polyak averaging coefficient
-    learning_rate_q: float = 4e-4   # Learning rate for critics
-    learning_rate_pi: float = 1.5e-4  # Learning rate for actor
-    learning_rate_eta: float = 1e-3 # Learning rate for temperature eta
-    target_kl: float = 0.15  # Target KL divergence for the M-step
-    num_samples_q: int = 50  # Number of samples for E-step (critic update)
-    num_samples_pi: int = 50 # Number of samples for M-step (actor update)
-    num_layers_actor: int = 1 #1 good, 2 worse 3more worse
+    #HYPERPARAMETERS
+    tau: float = 0.005
+    learning_rate_q: float = 4e-4
+    learning_rate_pi: float = 1.5e-4
+    learning_rate_eta: float = 1e-3
+    target_kl: float = 0.15
+    num_samples_q: int = 50
+    num_samples_pi: int = 50
+    num_layers_actor: int = 1
     num_units_actor: int = 76
-    num_layers_critic: int = 2 #2 good, 1 worse, 3 to be tested
+    num_layers_critic: int = 2
     num_units_critic: int = 128
     batch_size: int = 256
-    gamma: float = 0.99  # MDP discount factor
+    gamma: float = 0.99
     #########################################################################
-    default = False
-    if default:
-        batch_size: int = 256
-        gamma: float = 0.99  # MDP discount factor
-        tau: float = 0.005  # Polyak averaging coefficient
-        learning_rate_q: float = 3e-4  # Learning rate for critics
-        learning_rate_pi: float = 1e-4  # Learning rate for actor
-        learning_rate_eta: float = 1e-3 # Learning rate for temperature eta
-        target_kl: float = 0.01  # Target KL divergence for the M-step
-        num_samples_q: int = 20  # Number of samples for E-step (critic update)
-        num_samples_pi: int = 20 # Number of samples for M-step (actor update)
 
 
     def __init__(self, env):
@@ -198,8 +187,8 @@ class Agent:
         self.episode_returns = []
         self.lr_reduced = False
         self.initial_lr_pi = self.learning_rate_pi
-        self.safe_lr_pi = self.learning_rate_pi / 10
-
+        self.super_safe_lr_pi = self.learning_rate_pi / 10
+        self.safe_lr_pi = self.learning_rate_pi / 5
 
     def train(self):
         '''
@@ -209,12 +198,17 @@ class Agent:
 
         # REWARD-DEPENDENT LR SCHEDULING — THIS IS THE HOLY GRAIL
         
-        if not self.lr_reduced and (self.episode_returns[-1] if self.episode_returns else -200) >= -30:
-            print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.safe_lr_pi:.1e}")
-            for g in self.pi_optimizer.param_groups:
-                g['lr'] = self.safe_lr_pi
-            self.lr_reduced = True
-
+        if not self.lr_reduced:
+            last_return = (self.episode_returns[-1] if self.episode_returns else -200)
+            if last_return >= -100:
+                print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.safe_lr_pi:.1e}")
+                for g in self.pi_optimizer.param_groups:
+                    g['lr'] = self.safe_lr_pi
+            if last_return >= -30:
+                print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.super_safe_lr_pi:.1e}")
+                for g in self.pi_optimizer.param_groups:
+                    g['lr'] = self.super_safe_lr_pi
+                self.lr_reduced = True
 
         #####################################################################
         # TODO: code MPO training logic (E-Step and M-Step)

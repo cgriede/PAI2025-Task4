@@ -194,7 +194,7 @@ class Agent:
         # create buffer
         self.buffer = ReplayBuffer(self.buffer_size, self.obs_size, self.action_size, self.device)
         self.step_counter = 0
-        self.current_ep_return = -200
+        self.current_ep_return = 0.0
         self.episode_returns = []
         self.lr_reduced = False
         self.initial_lr_pi = self.learning_rate_pi
@@ -394,7 +394,7 @@ if __name__ == '__main__':
     TEST_EPISODES = 30  # evaluation episodes
     save_video = False
     verbose = False
-    seeds = np.arange(3)  # seeds for public evaluation
+    seeds = np.arange(10)  # seeds for public evaluation
     print(f"seeds: {seeds}")
 
     start = time.time()

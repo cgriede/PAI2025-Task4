@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium.utils import seeding
 from utils import ReplayBuffer, get_env, run_episode
-from plot_training_metrics import plot_training_metrics
 
 
 class MLP(nn.Module):

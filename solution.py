@@ -13,13 +13,15 @@ class MLP(nn.Module):
     A simple ReLU MLP constructed from a list of layer widths.
     LayerNorm applied after each hidden Linear layer and before activation to prevent initialization issues
     '''
-    def __init__(self, sizes, activation=nn.ReLU):
+    def __init__(self, sizes, activation=nn.ReLU, dropout=0.0):
         super().__init__()
         layers = []
         for i, (in_size, out_size) in enumerate(zip(sizes[:-1], sizes[1:])):
             layers.append(nn.Linear(in_size, out_size))
             if i < len(sizes) - 2:
                 layers.append(activation())
+                if dropout > 0.0:
+                    layers.append(nn.Dropout(p=dropout))
         self.layers = nn.Sequential(*layers)
     
     def forward(self, x):
@@ -143,23 +145,25 @@ class Agent:
     #########################################################################
     #HYPERPARAMETERS
     tau                   : float     = 0.005
-    learning_rate_q       : float     = 3e-4
-    learning_rate_pi      : float     = 1e-4
-    learning_rate_eta     : float     = 1e-4
-    target_kl_mu          : float     = 0.12    # Decoupled: higher for mean
-    target_kl_sigma       : float     = 0.0001  # Decoupled: tiny for cov
+    learning_rate_q       : float     = 4.5E-04
+    learning_rate_pi      : float     = 1.5E-04
+    learning_rate_eta     : float     = 1.00E-03
+    target_kl_mu          : float     = 0.1
+    target_kl_sigma       : float     = 0.0001
     num_samples_q         : int       = 80
     num_samples_pi        : int       = 40
     num_layers_actor      : int       = 1
-    num_units_actor       : int       = 70
+    num_units_actor       : int       = 90
+    actor_dropout         : float     = 0.15
     num_layers_critic     : int       = 2
     num_units_critic      : int       = 140
     batch_size            : int       = 256
     gamma                 : float     = 0.99
     warmup_episodes       : int       = 10
-    reverse_kl            : bool      = True
-    learn_rate_scheduling : bool      = False
-    activation_actor      : nn.Module = nn.ELU
+    learn_rate_scheduling : bool      =  False
+    activation_actor      : nn.Module =  nn.ELU
+    reverse_kl            : bool      =  False
+    decoupled_kl          : bool      =  True
     #########################################################################
     exploration_steps: int   = warmup_episodes * 200
 
@@ -196,8 +200,8 @@ class Agent:
         # TODO: initialize actor, critic and attributes
         # 1. Initialize Actor (pi) and Target Actor (pi_target)
         # (Use the Actor class)
-        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor)
-        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor)
+        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, dropout=self.actor_dropout)
+        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, dropout=self.actor_dropout)
         # 2. Initialize TWO Critics (q1, q2) and their Targets (q1_target, q2_target)
         # (This is the "twin critics" trick from TD3, which MPO also uses)
         self.q1 = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
@@ -351,19 +355,39 @@ class Agent:
 
         # 20. Get the new online distribution (post-update)
         dist_new = self.pi(obs)
+
+        if self.decoupled_kl:
+        # --- DECOUPLED KL (paper Appendix D.3) ---
+            # KL for mean (μ) — this is allowed to be larger
+            kl_mu = 0.5 * torch.mean(
+                ((dist_online.loc - dist_new.loc) ** 2) / (dist_new.scale ** 2 + 1e-8)
+            )
+            # KL for covariance (Σ) — this must stay tiny to prevent entropy collapse
+            kl_sigma = torch.mean(
+                torch.log(dist_new.scale / (dist_online.scale + 1e-8) + 1e-8) - 1 +
+                (dist_online.scale ** 2 + 1e-8) / (dist_new.scale ** 2 + 1e-8) +
+                ((dist_online.loc - dist_new.loc) ** 2) / (2 * (dist_new.scale ** 2 + 1e-8))
+            )
+            kl = kl_mu + kl_sigma
+
+            # --- DECOUPLED ETA LOSS ---
+            eta_loss = (torch.exp(self.log_eta) * (self.target_kl_mu - kl_mu).detach() +
+                        torch.exp(self.log_eta) * (self.target_kl_sigma - kl_sigma).detach())
+            
+        if not self.decoupled_kl:
+            self.target_kl = self.target_kl_mu + self.target_kl_sigma
+            #Get the Kullbak-Leibler divergence between the old and new online policies
+            with torch.no_grad():
+                if self.reverse_kl:
+                    kl = torch.distributions.kl_divergence(dist_new, dist_online, ).mean()
+                else:
+                    kl = torch.distributions.kl_divergence(dist_online, dist_new).mean()
+            # 21. Compute the temperature loss
+            # (Hint: eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach())
+            eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach()
         
-        #Get the Kullbak-Leibler divergence between the old and new online policies
-        with torch.no_grad():
-            if self.reverse_kl:
-                kl = torch.distributions.kl_divergence(dist_new, dist_online, ).mean()
-            else:
-                kl = torch.distributions.kl_divergence(dist_online, dist_new).mean()
         self.metrics["kl"].append(kl.item())
-        # 21. Compute the temperature loss
-        # (Hint: eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach())
-        eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach()
         self.metrics["etaloss"].append(eta_loss.item())
-        
         # 22. Optimize eta
         self.eta_optimizer.zero_grad()
         eta_loss.backward()
@@ -452,7 +476,7 @@ if __name__ == '__main__':
     generate_plots = True
     episode_plots_interval = 10
     verbose = True
-    seeds = np.arange(11)  # HYPERP for public evaluation
+    seeds = np.arange(11)  #  for public evaluation
     seeds = seeds[1:]
     print(f"seeds: {seeds}")
 

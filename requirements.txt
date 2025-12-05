@@ -1,6 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 pyarmor==6.3.3
 cryptography==39.0
-torch==2.4.1
+torch==2.4.1+cpu
 gymnasium==0.29.1
 gymnasium[other]
 

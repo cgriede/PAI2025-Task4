@@ -10,3 +10,4 @@ model complexity is also really important since choosing a too large network for
 ReLU is a bad activation function, I was in hyperparameter war and eventually started testing others;
 all performed better than ReLU, especially ELU but also Tanh.
 
+dropout can be really helpful in battling seeding issues

@@ -133,21 +133,43 @@ class Agent:
 
     #########################################################################
     #HYPERPARAMETERS
-    tau: float = 0.005
-    learning_rate_q: float = 4e-4
-    learning_rate_pi: float = 1.5e-4
-    learning_rate_eta: float = 1e-3
-    target_kl: float = 0.15
-    num_samples_q: int = 50
-    num_samples_pi: int = 50
-    num_layers_actor: int = 1
-    num_units_actor: int = 76
-    num_layers_critic: int = 2
-    num_units_critic: int = 128
-    batch_size: int = 256
-    gamma: float = 0.99
+    tau              : float = 0.005
+    learning_rate_q  : float = 4e-4
+    learning_rate_pi : float = 1.5e-4
+    learning_rate_eta: float = 3e-3
+    target_kl        : float = 0.1
+    num_samples_q    : int   = 50
+    num_samples_pi   : int   = 50
+    num_layers_actor : int   = 1
+    num_units_actor  : int   = 70
+    num_layers_critic: int   = 2
+    num_units_critic : int   = 140
+    batch_size       : int   = 256
+    gamma            : float = 0.99
+    warmup_episodes: int = 10
+    reverse_kl       : bool  = True
+    learn_rate_scheduling: bool = False
     #########################################################################
+    exploration_steps: int   = warmup_episodes * 200
 
+    """
+    These hyperparams work for passing baseline:
+    tau              : float = 0.005
+    learning_rate_q  : float = 4e-4
+    learning_rate_pi : float = 1.5e-4
+    learning_rate_eta: float = 3e-3
+    target_kl        : float = 0.1
+    num_samples_q    : int   = 50
+    num_samples_pi   : int   = 50
+    num_layers_actor : int   = 1
+    num_units_actor  : int   = 70
+    num_layers_critic: int   = 2
+    num_units_critic : int   = 140
+    batch_size       : int   = 256
+    gamma            : float = 0.99
+    reverse_kl       : bool  = True
+    warmup_episodes: int = 10
+    """
 
     def __init__(self, env):
         # extract informations from the environment
@@ -185,10 +207,9 @@ class Agent:
         self.step_counter = 0
         self.current_ep_return = 0.0
         self.episode_returns = []
-        self.lr_reduced = False
-        self.initial_lr_pi = self.learning_rate_pi
-        self.super_safe_lr_pi = self.learning_rate_pi / 10
-        self.safe_lr_pi = self.learning_rate_pi / 5
+        self.lr_reduction_stage = 0
+
+        self.metrics = {"qloss": [], "piloss": [], "etaloss": [], "eta": [], "kl": [], "return": []}
 
     def train(self):
         '''
@@ -196,19 +217,29 @@ class Agent:
         '''
         obs, action, next_obs, done, reward = self.buffer.sample(self.batch_size)
 
-        # REWARD-DEPENDENT LR SCHEDULING — THIS IS THE HOLY GRAIL
         
-        if not self.lr_reduced:
-            last_return = (self.episode_returns[-1] if self.episode_returns else -200)
-            if last_return >= -100:
-                print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.safe_lr_pi:.1e}")
+        last_return = (self.episode_returns[-1] if self.episode_returns else -200)
+        self.metrics["return"].append(last_return)
+
+        #skip training if we are in the random warmup phase
+        if self.step_counter < self.exploration_steps:
+            return None
+        # REWARD-DEPENDENT LR SCHEDULING
+        if not self.lr_reduction_stage >= 2 and self.learn_rate_scheduling:
+            new_lr = self.learning_rate_pi
+            if last_return >= -100 and not self.lr_reduction_stage >= 1:
+                new_lr = self.learning_rate_pi / 2
+                print(f"SUCCESS! Reducing actor LR {self.learning_rate_pi:.1e} → {new_lr:.1e}")
                 for g in self.pi_optimizer.param_groups:
-                    g['lr'] = self.safe_lr_pi
-            if last_return >= -30:
-                print(f"SUCCESS! Reducing actor LR {self.initial_lr_pi:.1e} → {self.super_safe_lr_pi:.1e}")
+                    g['lr'] = new_lr
+                self.lr_reduction_stage = 1
+            if last_return >= -30 and not self.lr_reduction_stage >= 2:
+                new_lr = self.learning_rate_pi / 5
+                print(f"SUCCESS! Reducing actor LR {self.learning_rate_pi:.1e} → {new_lr:.1e}")
                 for g in self.pi_optimizer.param_groups:
-                    g['lr'] = self.super_safe_lr_pi
-                self.lr_reduced = True
+                    g['lr'] = new_lr
+                self.lr_reduction_stage = 2
+            self.learning_rate_pi = new_lr
 
         #####################################################################
         # TODO: code MPO training logic (E-Step and M-Step)
@@ -241,10 +272,12 @@ class Agent:
         # 8. Compute the critic loss (MSE loss) for BOTH critics
         q1_values = self.q1(obs, action)
         q2_values = self.q2(obs, action)
-
-        q1_loss = nn.MSELoss()(q1_values, y)
-        q2_loss = nn.MSELoss()(q2_values, y)
+        
+        loss_fn = nn.MSELoss()
+        q1_loss = loss_fn(q1_values, y)
+        q2_loss = loss_fn(q2_values, y)
         q_loss = q1_loss + q2_loss
+        self.metrics["qloss"].append(q_loss.item())
         
         # 9. Optimize the critic(s)
         self.q_optimizer.zero_grad()
@@ -274,6 +307,7 @@ class Agent:
         q_values_samples = torch.min(q1_values_samples, q2_values_samples)
         # 15. Get the temperature eta
         eta = torch.exp(self.log_eta).detach()
+        self.metrics["eta"].append(eta.item())
         # 16. Compute the importance weights (w)
         # (Hint: w = softmax(q_values_samples / eta, dim=0))
         w = torch.softmax(q_values_samples / eta, dim=0).squeeze(-1)
@@ -289,6 +323,7 @@ class Agent:
         # 18. Compute the policy loss (weighted log-likelihood)
         # (Hint: pi_loss = - (w * log_prob_samples).mean())
         pi_loss = - (w * log_prob_samples).mean()
+        self.metrics["piloss"].append(pi_loss.item())
         # 19. Optimize the actor
         self.pi_optimizer.zero_grad()
         pi_loss.backward()
@@ -297,14 +332,19 @@ class Agent:
         # --- Temperature (eta) Update ---
 
         # 20. Get the new online distribution (post-update)
-        dist_online_new = self.pi(obs)
-        dist_online_new_det = torch.distributions.Normal(dist_online_new.loc.detach(), dist_online_new.scale.detach())
+        dist_new = self.pi(obs)
         
-        #switched order of distributions???? #NOTE: it was working on one seed only maybe this is the issue
-        kl = torch.distributions.kl.kl_divergence(dist_online_new_det, dist_online).mean()
+        #Get the Kullbak-Leibler divergence between the old and new online policies
+        with torch.no_grad():
+            if self.reverse_kl:
+                kl = torch.distributions.kl_divergence(dist_new, dist_online, ).mean()
+            else:
+                kl = torch.distributions.kl_divergence(dist_online, dist_new).mean()
+        self.metrics["kl"].append(kl.item())
         # 21. Compute the temperature loss
         # (Hint: eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach())
         eta_loss = torch.exp(self.log_eta) * (self.target_kl - kl).detach()
+        self.metrics["etaloss"].append(eta_loss.item())
         
         # 22. Optimize eta
         self.eta_optimizer.zero_grad()
@@ -337,6 +377,8 @@ class Agent:
         obs = torch.tensor(obs, device=self.device)
         # 2. Get the action distribution from the actor (self.pi)
         with torch.no_grad():
+            if train and self.step_counter < self.exploration_steps:
+                return np.array([np.random.uniform(-1.0, 1.0)], dtype=np.float64)
             # 3. Get action
             if train:
                 # During training: sample from the distribution
@@ -368,13 +410,14 @@ class Agent:
         self.current_ep_return += reward
         self.step_counter += 1
         # Detect episode end using the 200-step limit OR early termination
-        if self.step_counter >= 200 or terminated:
+        if self.step_counter % 200 == 0 or terminated:
             # Episode ended
             self.episode_returns.append(self.current_ep_return)
             print(f"Episode {len(self.episode_returns)} return: {self.current_ep_return:.1f}")
             # Reset for next episode
             self.current_ep_return = 0.0
-            self.step_counter = 0
+        if self.step_counter % 201 == 0:
+            self.metrics = {"qloss": [], "piloss": [], "etaloss": [], "eta": [], "kl": [], "return": []}
 
         self.buffer.store(obs, next_obs, action, reward, terminated)
 
@@ -382,13 +425,16 @@ class Agent:
 # This main function is provided here to enable some basic testing. 
 # ANY changes here WON'T take any effect while grading.
 if __name__ == '__main__':
+    from metrics_plotter import MetricsPlotter
 
-    WARMUP_EPISODES = 10  # initial episodes of uniform exploration
-    TRAIN_EPISODES = 30  # interactive episodes
+    WARMUP_EPISODES = 0  # initial episodes of uniform exploration
+    TRAIN_EPISODES = 40  # interactive episodes
     TEST_EPISODES = 30  # evaluation episodes
     save_video = False
-    verbose = False
-    seeds = np.arange(10)  # seeds for public evaluation
+    generate_plots = True
+    episode_plots_interval = 10
+    verbose = True
+    seeds = np.arange(1)  # seeds for public evaluation
     print(f"seeds: {seeds}")
 
     start = time.time()
@@ -410,15 +456,25 @@ if __name__ == '__main__':
 
         agent = Agent(env)
 
-        episode_training_data = {}
+        episode_training_metrics = {}
+        for key, value in agent.metrics.items():
+            episode_training_metrics.setdefault(key, [])
 
         for _ in range(WARMUP_EPISODES):
             run_episode(env, agent, mode='warmup', verbose=verbose, rec=False)
 
-
+        
         for i in range(TRAIN_EPISODES):
             episode_return = run_episode(env, agent, mode='train', verbose=verbose, rec=False)
-
+            try:
+                for key, value in agent.metrics.items():
+                    episode_training_metrics[key].append(np.mean(value) if isinstance(value, list) else value)
+                if not generate_plots or not ((i + 1) % episode_plots_interval == 0):
+                    continue
+                MetricsPlotter().plot_metrics(agent.metrics, i)
+                MetricsPlotter().plot_metrics(episode_training_metrics, f'episode{i}_seed{seed}')
+            except Exception as e:
+                print(f"Error plotting metrics at iteration {i}: {e}")
 
         for n_ep in range(TEST_EPISODES):
             video_rec = (save_video and n_ep == TEST_EPISODES - 1)  # only record last episode

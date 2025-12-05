@@ -6,6 +6,15 @@ __pycache__/
 # C extensions
 *.so
 
+#pictures
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.svg
+
 #videos
 *.mp4
 *.meta.json

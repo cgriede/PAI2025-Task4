@@ -133,22 +133,22 @@ class Agent:
 
     #########################################################################
     #HYPERPARAMETERS
-    tau              : float = 0.005
-    learning_rate_q  : float = 4e-4
-    learning_rate_pi : float = 1.5e-4
-    learning_rate_eta: float = 3e-3
-    target_kl        : float = 0.1
-    num_samples_q    : int   = 50
-    num_samples_pi   : int   = 50
-    num_layers_actor : int   = 1
-    num_units_actor  : int   = 70
-    num_layers_critic: int   = 2
-    num_units_critic : int   = 140
-    batch_size       : int   = 256
-    gamma            : float = 0.99
-    warmup_episodes: int = 10
-    reverse_kl       : bool  = True
-    learn_rate_scheduling: bool = False
+    tau                   : float = 0.005
+    learning_rate_q       : float = 4e-4
+    learning_rate_pi      : float = 1.5e-4
+    learning_rate_eta     : float = 3e-3
+    target_kl             : float = 0.1
+    num_samples_q         : int   = 50
+    num_samples_pi        : int   = 50
+    num_layers_actor      : int   = 1
+    num_units_actor       : int   = 70
+    num_layers_critic     : int   = 2
+    num_units_critic      : int   = 140
+    batch_size            : int   = 256
+    gamma                 : float = 0.99
+    warmup_episodes       : int   = 5
+    reverse_kl            : bool  = True
+    learn_rate_scheduling : bool  = False
     #########################################################################
     exploration_steps: int   = warmup_episodes * 200
 

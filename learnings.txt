@@ -6,3 +6,7 @@ performance of the algorithm is highly dependant on the learning rates chosen. I
 to some nonsensical solution for certain seeds.
 
 model complexity is also really important since choosing a too large network for the actor for example produces unstable results (stable shitty results)
+
+ReLU is a bad activation function, I was in hyperparameter war and eventually started testing others;
+all performed better than ReLU, especially ELU but also Tanh.
+

@@ -13,13 +13,13 @@ class MLP(nn.Module):
     A simple ReLU MLP constructed from a list of layer widths.
     LayerNorm applied after each hidden Linear layer and before activation to prevent initialization issues
     '''
-    def __init__(self, sizes):
+    def __init__(self, sizes, activation=nn.ReLU):
         super().__init__()
         layers = []
         for i, (in_size, out_size) in enumerate(zip(sizes[:-1], sizes[1:])):
             layers.append(nn.Linear(in_size, out_size))
             if i < len(sizes) - 2:
-                layers.append(nn.ReLU())
+                layers.append(activation())
         self.layers = nn.Sequential(*layers)
     
     def forward(self, x):
@@ -30,6 +30,12 @@ def init_weights_xavier(m):
         nn.init.xavier_uniform_(m.weight)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
+
+def init_weights_he(m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
 class Critic(nn.Module):
     '''
@@ -64,7 +70,7 @@ class Actor(nn.Module):
     Gaussian stochastic actor.
     Outputs a (mean, std) of a normal dist. 
     '''
-    def __init__(self, action_low, action_high,  obs_size, action_size, num_layers, num_units):
+    def __init__(self, action_low, action_high,  obs_size, action_size, num_layers, num_units, activation=nn.ReLU):
         super().__init__()
         #####################################################################
         # TODO: define the network layers
@@ -76,11 +82,14 @@ class Actor(nn.Module):
         self.action_scale = (action_high - action_low) / 2
         self.action_bias = (action_high + action_low) / 2
         self.action_size = action_size
+        self.net = MLP(sizes=([obs_size]  + ([num_units] * num_layers)  + [2 * action_size]), activation=activation)
 
-        self.net = MLP([obs_size]  + ([num_units] * num_layers)  + [2 * action_size])
-
-            # Apply it
-        self.net.apply(self._init_actor_weights)
+        if activation == nn.ReLU:
+            self.net.apply(self._init_actor_weights)
+        elif activation == nn.Tanh:
+            self.net.apply(init_weights_xavier)
+        else:
+            self.net.apply(init_weights_he)
 
     # Robust actor initialization – the only one that survives all seeds on this CartPole+MPO
     def _init_actor_weights(self, m):
@@ -133,27 +142,29 @@ class Agent:
 
     #########################################################################
     #HYPERPARAMETERS
-    tau                   : float = 0.005
-    learning_rate_q       : float = 4e-4
-    learning_rate_pi      : float = 1.5e-4
-    learning_rate_eta     : float = 3e-3
-    target_kl             : float = 0.1
-    num_samples_q         : int   = 50
-    num_samples_pi        : int   = 50
-    num_layers_actor      : int   = 1
-    num_units_actor       : int   = 70
-    num_layers_critic     : int   = 2
-    num_units_critic      : int   = 140
-    batch_size            : int   = 256
-    gamma                 : float = 0.99
-    warmup_episodes       : int   = 5
-    reverse_kl            : bool  = True
-    learn_rate_scheduling : bool  = False
+    tau                   : float     = 0.005
+    learning_rate_q       : float     = 3e-4
+    learning_rate_pi      : float     = 1e-4
+    learning_rate_eta     : float     = 1e-4
+    target_kl_mu          : float     = 0.12    # Decoupled: higher for mean
+    target_kl_sigma       : float     = 0.0001  # Decoupled: tiny for cov
+    num_samples_q         : int       = 80
+    num_samples_pi        : int       = 40
+    num_layers_actor      : int       = 1
+    num_units_actor       : int       = 70
+    num_layers_critic     : int       = 2
+    num_units_critic      : int       = 140
+    batch_size            : int       = 256
+    gamma                 : float     = 0.99
+    warmup_episodes       : int       = 10
+    reverse_kl            : bool      = True
+    learn_rate_scheduling : bool      = False
+    activation_actor      : nn.Module = nn.ELU
     #########################################################################
     exploration_steps: int   = warmup_episodes * 200
 
     """
-    These hyperparams work for passing baseline:
+    These hyperparams work for passing baseline (on seed 0):
     tau              : float = 0.005
     learning_rate_q  : float = 4e-4
     learning_rate_pi : float = 1.5e-4
@@ -185,8 +196,8 @@ class Agent:
         # TODO: initialize actor, critic and attributes
         # 1. Initialize Actor (pi) and Target Actor (pi_target)
         # (Use the Actor class)
-        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor)
-        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor)
+        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor)
+        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor)
         # 2. Initialize TWO Critics (q1, q2) and their Targets (q1_target, q2_target)
         # (This is the "twin critics" trick from TD3, which MPO also uses)
         self.q1 = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
@@ -210,6 +221,8 @@ class Agent:
         self.lr_reduction_stage = 0
 
         self.metrics = {"qloss": [], "piloss": [], "etaloss": [], "eta": [], "kl": [], "return": []}
+
+        self.heat_recovery_mode = False
 
     def train(self):
         '''
@@ -304,13 +317,18 @@ class Agent:
         q1_values_samples = self.q1(obs_expanded, actions_squashed).detach()
         q2_values_samples = self.q2(obs_expanded, actions_squashed).detach()
 
-        q_values_samples = torch.min(q1_values_samples, q2_values_samples)
+        #q_values_samples = torch.min(q1_values_samples, q2_values_samples)
         # 15. Get the temperature eta
         eta = torch.exp(self.log_eta).detach()
         self.metrics["eta"].append(eta.item())
         # 16. Compute the importance weights (w)
         # (Hint: w = softmax(q_values_samples / eta, dim=0))
-        w = torch.softmax(q_values_samples / eta, dim=0).squeeze(-1)
+
+        #w = torch.softmax(q_values_samples / eta, dim=0).squeeze(-1)
+
+        #NOTE: this is experimental using one critic instead of min of two
+        w = torch.softmax(q1_values_samples / eta, dim=0).squeeze(-1)
+        
 
         # 17. Compute the log-probability of the sampled actions
         #     under the online policy
@@ -428,13 +446,14 @@ if __name__ == '__main__':
     from metrics_plotter import MetricsPlotter
 
     WARMUP_EPISODES = 0  # initial episodes of uniform exploration
-    TRAIN_EPISODES = 40  # interactive episodes
+    TRAIN_EPISODES = 20  # interactive episodes
     TEST_EPISODES = 30  # evaluation episodes
     save_video = False
     generate_plots = True
     episode_plots_interval = 10
     verbose = True
-    seeds = np.arange(1)  # seeds for public evaluation
+    seeds = np.arange(11)  # HYPERP for public evaluation
+    seeds = seeds[1:]
     print(f"seeds: {seeds}")
 
     start = time.time()

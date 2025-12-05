@@ -72,7 +72,7 @@ class Actor(nn.Module):
     Gaussian stochastic actor.
     Outputs a (mean, std) of a normal dist. 
     '''
-    def __init__(self, action_low, action_high,  obs_size, action_size, num_layers, num_units, activation=nn.ReLU):
+    def __init__(self, action_low, action_high,  obs_size, action_size, num_layers, num_units, activation=nn.ReLU, dropout=0.0):
         super().__init__()
         #####################################################################
         # TODO: define the network layers
@@ -84,7 +84,7 @@ class Actor(nn.Module):
         self.action_scale = (action_high - action_low) / 2
         self.action_bias = (action_high + action_low) / 2
         self.action_size = action_size
-        self.net = MLP(sizes=([obs_size]  + ([num_units] * num_layers)  + [2 * action_size]), activation=activation)
+        self.net = MLP(sizes=([obs_size]  + ([num_units] * num_layers)  + [2 * action_size]), activation=activation, dropout=dropout)
 
         if activation == nn.ReLU:
             self.net.apply(self._init_actor_weights)
@@ -200,8 +200,8 @@ class Agent:
         # TODO: initialize actor, critic and attributes
         # 1. Initialize Actor (pi) and Target Actor (pi_target)
         # (Use the Actor class)
-        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, dropout=self.actor_dropout)
-        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, dropout=self.actor_dropout)
+        self.pi = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, self.actor_dropout)
+        self.pi_target = Actor(self.action_low, self.action_high, self.obs_size, self.action_size, self.num_layers_actor, self.num_units_actor, self.activation_actor, self.actor_dropout)
         # 2. Initialize TWO Critics (q1, q2) and their Targets (q1_target, q2_target)
         # (This is the "twin critics" trick from TD3, which MPO also uses)
         self.q1 = Critic(self.obs_size, self.action_size, self.num_layers_critic, self.num_units_critic)
